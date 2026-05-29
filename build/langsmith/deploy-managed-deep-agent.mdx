@@ -1,0 +1,583 @@
+---
+title: Managed Deep Agents
+description: Create, run, and operate Managed Deep Agents with the private preview CLI and API.
+icon: "robot"
+tag: "PREVIEW"
+---
+
+Managed Deep Agents is a hosted runtime for creating, running, and operating deep agents in LangSmith. The recommended workflow is to scaffold a local agent project with `deepagents-cli`, edit files locally, register or connect MCP servers when needed, and deploy the project to Managed Deep Agents.
+
+<Note>
+    Managed Deep Agents is in private preview. [Join the waitlist](https://www.langchain.com/langsmith-managed-deep-agents-waitlist) to request access.
+</Note>
+
+<Note>
+    The Managed Deep Agents deploy flow requires the beta release of `deepagents-cli`. The stable Deep Agents deploy experience remains available and unchanged while Managed Deep Agents is in private preview.
+</Note>
+
+[Deep Agents](/oss/python/deepagents/overview) give developers an open-source harness for building agents that can plan, use tools, delegate to subagents, write files, and work over long horizons. Managed Deep Agents packages the operational layer around that harness, so you can focus on the agent's behavior instead of running custom runtime infrastructure.
+
+For route-level details, see the [Managed Deep Agents API reference](/langsmith/managed-deep-agents-api).
+
+## When to use Managed Deep Agents
+
+Use Managed Deep Agents when you want to:
+
+- Create and manage deep agents from local project files.
+- Run long-running agents without standing up a custom agent server.
+- Stream runs and preserve durable thread state.
+- Use a managed file tree for instructions, skills, subagents, tools, and runtime files.
+- Register workspace-level MCP servers, including OAuth MCP servers.
+- Inspect traces and agent behavior in LangSmith.
+
+<Tip>
+    You can also deploy Deep Agents with a standard [LangSmith Deployment](/langsmith/deployment-quickstart). Use that path when you need custom application code, custom routes, advanced authentication, full Agent Server APIs, stronger isolation controls, or maximum scalability.
+</Tip>
+
+## Prerequisites
+
+Before you start, make sure you have:
+
+- Managed Deep Agents private preview access.
+- A LangSmith API key for a workspace with private preview access.
+- The beta release of `deepagents-cli`.
+
+Install or upgrade the CLI with `uv`:
+
+```bash
+uv tool install --prerelease allow deepagents-cli
+```
+
+If you already installed the tool, upgrade it:
+
+```bash
+uv tool upgrade --prerelease allow deepagents-cli
+```
+
+If you were given an exact beta version, pin that version:
+
+```bash
+uv tool install --force "deepagents-cli==<version>"
+```
+
+As a fallback, you can install the CLI with `pip`:
+
+```bash
+pip install -U --pre deepagents-cli
+```
+
+Set your LangSmith API key:
+
+```bash
+export LANGSMITH_API_KEY="<LANGSMITH_API_KEY>"
+```
+
+<Note>
+    If `deepagents init`, `deploy`, `agents`, or `mcp-servers` are missing or behave unexpectedly, confirm the beta is active with `deepagents --version`. A previously installed stable `deepagents` can shadow the beta release on your `PATH`.
+</Note>
+
+## Create a project
+
+Create a Managed Deep Agents project:
+
+```bash
+deepagents init my-agent
+cd my-agent
+```
+
+The command scaffolds:
+
+| File or directory | Purpose |
+| --- | --- |
+| `agent.json` | Configures the managed agent name, model, backend, and optional target `agent_id`. |
+| `AGENTS.md` | Defines the agent instructions. |
+| `skills/` | Contains optional skills the agent can use. |
+| `.gitignore` | Excludes local environment files. |
+
+You can also add:
+
+| File or directory | Purpose |
+| --- | --- |
+| `subagents/` | Contains subagent definitions for delegated work. |
+| `tools.json` | Configures the MCP-backed tools the agent can call. Required if the agent uses MCP tools. |
+
+The generated `agent.json` uses the readable local CLI shape:
+
+```json
+{
+  "name": "my-agent",
+  "description": "A managed deep agent.",
+  "model": "anthropic:claude-sonnet-4-6",
+  "backend": {
+    "type": "thread_scoped_sandbox"
+  }
+}
+```
+
+Edit `AGENTS.md` to define the agent's behavior. Add skills or subagents if your agent needs extra procedures or delegated workers.
+
+If your agent calls MCP tools, [register the MCP server](#configure-mcp-servers) once for the workspace, then add a [`tools.json`](#reference-mcp-servers) that references it by URL before you deploy.
+
+### Model configuration
+
+The preferred local config uses top-level `model`:
+
+```json
+{
+  "name": "my-agent",
+  "model": "anthropic:claude-sonnet-4-6"
+}
+```
+
+During deploy, the CLI sends the API payload shape:
+
+```json
+{
+  "runtime": {
+    "model": {
+      "model_id": "anthropic:claude-sonnet-4-6"
+    }
+  }
+}
+```
+
+The CLI still accepts the older API-shaped local form:
+
+```json
+{
+  "name": "my-agent",
+  "runtime": {
+    "model": {
+      "model_id": "anthropic:claude-sonnet-4-6"
+    }
+  }
+}
+```
+
+Use either top-level `model` or `runtime`, not both. The CLI rejects configs that contain both fields.
+
+## Deploy the agent
+
+Deploy the local project:
+
+```bash
+deepagents deploy
+```
+
+The first deploy creates a Managed Deep Agent through `/v1/deepagents/agents`. Later deploys update the same remote agent by using user-local deploy state, not hidden state committed to the repository.
+
+On success, the CLI prints the agent name, ID, short revision, the agent URL, and a post-deploy MCP health check:
+
+```text
+Deployed: my-agent
+  agent_id: e2de7a35-9dda-462b-b982-9e57051993bc
+  revision: 13ac11f1
+  https://smith.langchain.com/o/-/agents/e2de7a35-9dda-462b-b982-9e57051993bc
+  health:   {'agent_id': '...', 'mcp_check': {'ok': True, 'servers': [{'url': 'https://example.com/mcp', 'ok': True}]}, ...}
+```
+
+A `mcp_check.ok` of `True` confirms the agent can reach the MCP servers its tools reference. Each deploy creates a new agent revision, even when no managed files changed, because deploy always sends a metadata update; the managed file tree itself only changes when its contents do.
+
+Creating a Managed Deep Agent creates:
+
+- A Managed Deep Agent resource.
+- A separate LangSmith tracing project for the agent.
+- A Context Hub agent repo that stores the managed file tree.
+
+It does not create a LangSmith Deployment.
+
+Useful deploy flags:
+
+| Flag | Use |
+| --- | --- |
+| `--dry-run` | Print the deploy payload and managed file tree without sending a request. |
+| `--detach` | Exit after the create or update request without polling health. |
+| `--reset` | Discard local deploy state and create a fresh agent. Cannot be used when `agent.json` declares `agent_id`. |
+| `--yes` | Confirm target-agent updates without prompting. Useful in automation. |
+
+## Update a shared agent
+
+For shared repositories or intentional updates to an existing Managed Deep Agent, declare the target visibly in `agent.json`:
+
+```json
+{
+  "name": "my-agent",
+  "agent_id": "agent-uuid",
+  "model": "anthropic:claude-sonnet-4-6",
+  "backend": {
+    "type": "thread_scoped_sandbox"
+  }
+}
+```
+
+Then deploy:
+
+```bash
+deepagents deploy
+```
+
+On first use, the CLI asks you to confirm before updating that remote agent. In automation, pass `--yes`:
+
+```bash
+deepagents deploy --yes
+```
+
+## Configure MCP servers
+
+MCP servers are workspace-level resources. Register or connect MCP servers before deploying an agent that references them.
+
+### Add a static-header MCP server
+
+Register a server:
+
+```bash
+deepagents mcp-servers add \
+  --url https://example.com/mcp \
+  --name my-tools
+```
+
+If the server requires static credentials, pass headers:
+
+```bash
+deepagents mcp-servers add \
+  --url https://example.com/mcp \
+  --name my-tools \
+  --header Authorization="Bearer <token>"
+```
+
+### Add an OAuth MCP server
+
+Register and connect an OAuth MCP server:
+
+```bash
+deepagents mcp-servers add \
+  --url https://example.com/mcp \
+  --name github-tools \
+  --auth-type oauth \
+  --connect
+```
+
+The CLI:
+
+1. Creates the MCP server with `auth_type=oauth` and `oauth_mode=per_user_dynamic_client`.
+2. Registers or discovers the caller's per-user OAuth provider with `/v1/deepagents/mcp-servers/{mcp_server_id}/oauth-provider`.
+3. Starts an OAuth session with `/v1/deepagents/auth-sessions`.
+4. Prints and opens the verification URL.
+5. Polls `/v1/deepagents/auth-sessions/{session_id}` until OAuth completes.
+
+To connect an OAuth MCP server that already exists, run:
+
+```bash
+deepagents mcp-servers connect <mcp_server_id>
+```
+
+### Reference MCP servers
+
+Reference MCP tools from a `tools.json` file in your project root. Each entry names a tool exposed by a registered MCP server and points at that server by URL:
+
+```json
+{
+  "tools": [
+    {
+      "name": "example_tool",
+      "mcp_server_url": "https://example.com/mcp",
+      "mcp_server_name": "my-tools",
+      "display_name": "example_tool"
+    }
+  ],
+  "interrupt_config": {
+    "https://example.com/mcp::example_tool::my-tools": true
+  }
+}
+```
+
+Each tool requires `name` (the tool name as exposed by the MCP server) and `mcp_server_url`. The `mcp_server_name` and `display_name` fields are optional. Use `interrupt_config` to require human approval before a tool runs; key each entry by `"{mcp_server_url}::{tool_name}::{mcp_server_name}"` and set it to `true`.
+
+<Note>
+    `deepagents init` does not create `tools.json`. Add it yourself when your agent calls MCP tools, then run `deepagents deploy`. An agent with no `tools.json` deploys with no MCP tools.
+</Note>
+
+Before deploying, the CLI validates referenced MCP server URLs. If a server URL is not registered, deploy fails with a command hint to add it. If an OAuth server is registered but the caller cannot invoke it, deploy fails with a hint to run `deepagents mcp-servers connect <mcp_server_id>`.
+
+## Manage agents and MCP servers
+
+List agents:
+
+```bash
+deepagents agents list
+```
+
+Inspect an agent:
+
+```bash
+deepagents agents get <agent_id>
+deepagents agents get <agent_id> --include-files
+```
+
+Delete an agent:
+
+```bash
+deepagents agents delete <agent_id> --yes
+```
+
+List MCP servers:
+
+```bash
+deepagents mcp-servers list
+```
+
+Inspect, connect, or delete an MCP server:
+
+```bash
+deepagents mcp-servers get <mcp_server_id>
+deepagents mcp-servers connect <mcp_server_id>
+deepagents mcp-servers delete <mcp_server_id> --yes
+```
+
+## Use the REST API directly
+
+Use the CLI for normal deploy workflows. Use the REST API when you need a custom client, a workflow that cannot shell out to the CLI, or direct control over request payloads.
+
+Set request defaults:
+
+```bash
+export LANGSMITH_API_KEY="<LANGSMITH_API_KEY>"
+export LANGSMITH_API_URL="https://api.smith.langchain.com"
+export DEEPAGENTS_BASE_URL="$LANGSMITH_API_URL/v1/deepagents"
+```
+
+Requests require the `X-Api-Key` header:
+
+```txt
+X-Api-Key: <LANGSMITH_API_KEY>
+```
+
+Install an HTTP client for Python examples:
+
+```bash
+uv pip install httpx
+```
+
+### Create an agent
+
+Create the agent with `POST /v1/deepagents/agents`. REST payloads use the API shape, including `runtime.model.model_id`:
+
+<Tabs>
+  <Tab title="Python (httpx)">
+    ```python
+    import os
+
+    import httpx
+
+    BASE_URL = os.environ["DEEPAGENTS_BASE_URL"]
+    HEADERS = {"X-Api-Key": os.environ["LANGSMITH_API_KEY"]}
+
+    response = httpx.post(
+        f"{BASE_URL}/agents",
+        headers=HEADERS,
+        json={
+            "name": "research-assistant",
+            "description": "Research assistant that can search the web and summarize sources.",
+            "runtime": {"model": {"model_id": "anthropic:claude-sonnet-4-6"}},
+            "backend": {"type": "thread_scoped_sandbox"},
+            "instructions": (
+                "You are a careful research assistant. Search for sources, "
+                "keep notes, and return concise answers with citations."
+            ),
+        },
+    )
+    response.raise_for_status()
+    agent_id = response.json()["id"]
+    print(f"Agent ID: {agent_id}")
+    ```
+  </Tab>
+  <Tab title="JavaScript (fetch)">
+    ```ts
+    const BASE_URL = process.env.DEEPAGENTS_BASE_URL!
+    const HEADERS = {
+      "X-Api-Key": process.env.LANGSMITH_API_KEY!,
+      "Content-Type": "application/json",
+    }
+
+    const response = await fetch(`${BASE_URL}/agents`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({
+        name: "research-assistant",
+        description: "Research assistant that can search the web and summarize sources.",
+        runtime: { model: { model_id: "anthropic:claude-sonnet-4-6" } },
+        backend: { type: "thread_scoped_sandbox" },
+        instructions:
+          "You are a careful research assistant. Search for sources, keep notes, and return concise answers with citations.",
+      }),
+    })
+    if (!response.ok) throw new Error(await response.text())
+    const { id: agentId } = await response.json()
+    console.log(`Agent ID: ${agentId}`)
+    ```
+  </Tab>
+  <Tab title="cURL">
+    ```bash
+    curl --request POST \
+      --url "$DEEPAGENTS_BASE_URL/agents" \
+      --header "X-Api-Key: $LANGSMITH_API_KEY" \
+      --header 'Content-Type: application/json' \
+      --data '{
+        "name": "research-assistant",
+        "description": "Research assistant that can search the web and summarize sources.",
+        "runtime": {
+          "model": {
+            "model_id": "anthropic:claude-sonnet-4-6"
+          }
+        },
+        "backend": {
+          "type": "thread_scoped_sandbox"
+        },
+        "instructions": "You are a careful research assistant. Search for sources, keep notes, and return concise answers with citations."
+      }'
+    ```
+  </Tab>
+</Tabs>
+
+### Register MCP servers
+
+Register a static-header MCP server with `POST /v1/deepagents/mcp-servers`:
+
+```bash
+curl --request POST \
+  --url "$DEEPAGENTS_BASE_URL/mcp-servers" \
+  --header "X-Api-Key: $LANGSMITH_API_KEY" \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "name": "my-tools",
+    "url": "https://example.com/mcp",
+    "headers": [
+      {"key": "Authorization", "value": "Bearer <token>"}
+    ]
+  }'
+```
+
+For an OAuth MCP server, use this route sequence:
+
+1. `POST /v1/deepagents/mcp-servers` with `auth_type=oauth` and `oauth_mode=per_user_dynamic_client`.
+2. `POST /v1/deepagents/mcp-servers/{mcp_server_id}/oauth-provider`.
+3. `POST /v1/deepagents/auth-sessions`.
+4. `GET /v1/deepagents/auth-sessions/{session_id}` until the session status is `COMPLETED`.
+
+### Create a thread
+
+Create a thread before running the agent. Threads preserve conversation and execution state for long-running work:
+
+```bash
+curl --request POST \
+  --url "$DEEPAGENTS_BASE_URL/threads" \
+  --header "X-Api-Key: $LANGSMITH_API_KEY" \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "agent_id": "'"$AGENT_ID"'",
+    "options": {
+      "test_run": false,
+      "skip_memory_write_protection": false
+    }
+  }'
+```
+
+### Stream a run
+
+Start work on the thread with `POST /v1/deepagents/threads/{thread_id}/runs/stream`. Include the `agent_id` in the request body and set `Accept: text/event-stream`:
+
+```bash
+curl --request POST \
+  --url "$DEEPAGENTS_BASE_URL/threads/$THREAD_ID/runs/stream" \
+  --header "X-Api-Key: $LANGSMITH_API_KEY" \
+  --header 'Accept: text/event-stream' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "agent_id": "'"$AGENT_ID"'",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Research recent approaches to agent memory and summarize the main tradeoffs."
+      }
+    ],
+    "stream_mode": ["values", "updates", "messages-tuple"],
+    "stream_subgraphs": true,
+    "user_timezone": "America/Los_Angeles"
+  }'
+```
+
+Use stream modes based on the experience you want to build:
+
+| Stream mode | Use for |
+| --- | --- |
+| `values` | Full state snapshots after steps. |
+| `updates` | Incremental state updates as the agent works. |
+| `messages-tuple` | Token-level message output for chat UIs. |
+
+`messages-tuple` mode emits a `messages` event. The payload is a `[chunk, metadata]` tuple.
+
+## Inspect the result in LangSmith
+
+Managed Deep Agents runs are traced in the separate tracing project created for the agent. Open traces in LangSmith to inspect:
+
+- User inputs and final responses.
+- Model calls and tool calls.
+- Subagent activity.
+- Files and runtime state created during the run.
+
+The Context Hub agent repo stores the managed file tree for the agent, including instructions, skills, subagents, and tool configuration.
+
+## Limits and notes
+
+Operational notes that apply during private preview. Behavior may change before general availability.
+
+### Stable deploy experience
+
+Managed Deep Agents deploy is available through the beta CLI release during private preview. The stable Deep Agents deploy experience continues to work until Managed Deep Agents reaches public beta and the deploy command switches to the new behavior.
+
+### Supported models
+
+Pass model identifiers in the form `{provider}:{model_id}`. For example, `anthropic:claude-sonnet-4-6`. The runtime resolves models with [`init_chat_model`](https://reference.langchain.com/python/langchain/chat_models/base/init_chat_model), so any provider that `init_chat_model` supports is usable from Managed Deep Agents. See [Supported providers and models](/oss/python/langchain/models#supported-providers-and-models) for the current list.
+
+Values without a colon are interpreted as references to a saved Playground configuration rather than as model identifiers, so always supply the full `{provider}:{model_id}` form when configuring a model directly.
+
+### Thread retention
+
+Threads have no retention window or per-workspace cap during private preview. Create as many as you need. Existing threads remain accessible for the duration of the preview.
+
+### Rate limits and quotas
+
+The Managed Deep Agents endpoints do not enforce per-key, per-workspace, or per-agent request rate limits during private preview.
+
+### Agent limits
+
+Free LangSmith workspaces are limited to **one** Managed Deep Agent. Paid LangSmith plans can create unlimited agents. When a free workspace is already at its limit, `deepagents deploy` (and `POST /v1/deepagents/agents`) fails with `HTTP 409` and a message to delete the existing agent or upgrade your plan.
+
+### Deleting agents
+
+`DELETE /agents/{agent_id}` does not cascade to threads. Threads created against a deleted agent remain queryable but cannot start new runs. Track and delete threads explicitly when you want to clean them up.
+
+### API stability
+
+Routes live under `/v1/deepagents`, but the surface is in private preview and may change before general availability. Breaking changes are communicated to preview customers directly through the contact provided when access was granted.
+
+### Support and feedback
+
+Preview access includes direct support. The contact for bug reports and feature requests is included in the email you receive when access is granted.
+
+## Private preview scope
+
+Managed Deep Agents is available on LangSmith Cloud in the US region only during private preview. Self-hosted and Hybrid deployments are not supported, and EU and other regions will follow general availability.
+
+The API also does not mirror every LangSmith Deployment endpoint in private preview. A Managed Deep Agent is not a LangSmith Deployment.
+
+---
+
+<div className="source-links">
+<Callout icon="terminal-2">
+    [Connect these docs](/use-these-docs) to Claude, VSCode, and more via MCP for real-time answers.
+</Callout>
+<Callout icon="edit">
+    [Edit this page on GitHub](https://github.com/langchain-ai/docs/edit/main/src/langsmith/deploy-managed-deep-agent.mdx) or [file an issue](https://github.com/langchain-ai/docs/issues/new/choose).
+</Callout>
+</div>
